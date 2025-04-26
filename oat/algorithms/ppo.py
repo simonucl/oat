@@ -611,7 +611,10 @@ class PPOLearner(RLLearner):
         infos.update(
             {f"{k}_inf": torch.tensor(stats[k]).isinf().sum() for k in stats.keys()}
         )
-        infos["policy_grad_norm"] = torch.tensor(stats["policy_grad_norm"]).max()
+        if stats["policy_grad_norm"]:
+            infos["policy_grad_norm"] = torch.tensor(stats["policy_grad_norm"]).max()
+        else:
+            infos["policy_grad_norm"] = torch.tensor(0)
         infos["get_grad_norm_time"] = torch.tensor(sum(stats["get_grad_norm_time"]))
         if not args.reinforce_update:
             infos["logprobs_diff_max"] = torch.tensor(stats["logprobs_diff_max"]).max()

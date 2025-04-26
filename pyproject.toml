@@ -48,7 +48,7 @@ dependencies = [
   "torchmetrics",
   "tqdm",
   "tyro",
-  "transformers==4.51",
+  "transformers>=4.51",
   "transformers_stream_generator",
   "vllm==0.8.4",
   "rich",

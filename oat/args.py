@@ -14,7 +14,7 @@
 """Argument parsing."""
 import math
 from dataclasses import dataclass
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import torch
 import tyro
@@ -30,7 +30,7 @@ class OATArgs:
     # Launchpad launch type
     launch_type: str = "local_mp"
     # Number of GPUs to run the experiment.
-    gpus: int = 8
+    gpus: Union[int, str] = 8   
     # Ratio of pre-allocated GPU memory for vLLM.
     vllm_gpu_ratio: float = 0.25
     # Max model length.
@@ -274,7 +274,11 @@ def default_args_validation(args: OATArgs):
     if args.asynchronous:
         assert not args.collocate, "async training needs to disable collocation"
     gpu_available = torch.cuda.device_count()
+    if isinstance(args.gpus, str):
+        num_gpus = len(args.gpus.split(","))
+    else:
+        num_gpus = args.gpus
     assert (
-        gpu_available >= args.gpus
-    ), f"{gpu_available} GPUs available, but {args.gpus} required"
+        gpu_available >= num_gpus
+    ), f"{gpu_available} GPUs available, but {num_gpus} required"
     return args

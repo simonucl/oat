@@ -36,7 +36,10 @@ def get_program(
 
     # Resource.
     if args.collocate:
-        actor_gpus = learner_gpus = list(range(args.gpus))
+        if isinstance(args.gpus, str):
+            actor_gpus = learner_gpus = [int(gpu) for gpu in args.gpus.split(",")]
+        else:
+            actor_gpus = learner_gpus = list(range(args.gpus))
     else:
         if args.gpus % 2 == 0:
             actor_gpus = list(range(args.gpus // 2))
