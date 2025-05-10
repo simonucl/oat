@@ -37,7 +37,6 @@ python -m oat.experiment.run_ppo \
     --train_split train \
     --train_batch_size 64 \
     --train_batch_size_per_device 8 \
-    --mini_train_batch_size_per_device 8 \
     --rollout_batch_size 64 \
     --rollout_batch_size_per_device 8 \
     --pi_buffer_maxlen_per_device 64 \
@@ -71,7 +70,7 @@ User: Using the numbers [79, 17, 60], create an equation that equals 36. You can
 We use the following command to RL-tune a `Qwen/Qwen2.5-3B` base model and observe R1-zero-like training curves within 3 hours training on 8 GPUs.
 
 ```
-python examples/r1_zero_math.py \
+python examples/r1_zero_countdown.py \
     --critic_type grpo \
     --gpus 8 \
     --vllm_gpu_ratio 0.7 \
@@ -107,7 +106,6 @@ python examples/r1_zero_math.py \
     --save_steps -1 \
     --train_batch_size 128 \
     --train_batch_size_per_device 2 \
-    --mini_train_batch_size_per_device 2 \
     --rollout_batch_size 128 \
     --rollout_batch_size_per_device 32 \
     --pi_buffer_maxlen_per_device 256 \

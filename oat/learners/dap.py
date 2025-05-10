@@ -48,7 +48,6 @@ class DAPLearner(LearnerBase):
                 use_flash_attention_2=args.flash_attn,
                 bf16=args.bf16,
                 load_in_4bit=args.load_in_4bit,
-                ds_config=self.strategy.get_ds_eval_config(offload=args.ref_offload),
             )
             disable_dropout(self.ref_model)
         else:
@@ -160,7 +159,7 @@ class DAPLearner(LearnerBase):
 
                 step_bar.update()
                 self.global_step += 1
-                if self.global_step % self.strategy.accumulated_gradient == 0:
+                if self.global_step % self.strategy.grad_acc_step == 0:
                     learn_batch_time.append(time.time() - st)
                     self.gradient_update_elapse = time.time() - self.gradient_update_st
                     st = time.time()
