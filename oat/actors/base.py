@@ -13,14 +13,17 @@
 # limitations under the License.
 
 import abc
+import asyncio
 import logging
 import os
 import time
 from typing import List, Union
 
 import torch
+import tqdm.asyncio
 import vllm
 from packaging import version
+from vllm import AsyncEngineArgs, AsyncLLMEngine
 from vllm.lora.request import LoRARequest
 
 from oat import oracles
@@ -93,11 +96,12 @@ class ActorBase(abc.ABC):
         if args.disable_cascade_attn is not None:
             self.vllm_args.update({"disable_cascade_attn": args.disable_cascade_attn})
 
+        engine_args = AsyncEngineArgs(**self.vllm_args)
         _wait_time = 5
         for _ in range(10):
             # Retry in case network error when accessing HF.
             try:
-                self.llm = vllm.LLM(**self.vllm_args)
+                self.engine = AsyncLLMEngine.from_engine_args(engine_args)
                 break
             except Exception as e:
                 # In case of timeout.
@@ -108,7 +112,7 @@ class ActorBase(abc.ABC):
         else:
             raise RuntimeError(f"vllm cannot load the model")
 
-        self.tokenizer = self.llm.get_tokenizer()
+        self.tokenizer = asyncio.run(self.engine.get_tokenizer())
         # TODO(liuzc): after vllm upgraded to 0.8.3, we could not access `model_executor`
         # We disable this temporarily since we focus on on-policy algos - actor policy
         # is the same as the one we want to evaluate.
@@ -132,13 +136,11 @@ class ActorBase(abc.ABC):
         )
         self.oracle_batch_size = args.oracle_batch_size
 
-    def generate(
+    async def generate_async(
         self,
-        prompts: List[str],
+        prompt: str,
         sampling_params: vllm.SamplingParams,
     ):
-        self.generate_mode = True
-
         lora_request = (
             LoRARequest(
                 os.path.basename(self.lora_path), hash(self.lora_path), self.lora_path
@@ -146,30 +148,37 @@ class ActorBase(abc.ABC):
             if (self.use_lora_req and self.lora_path)
             else None
         )
-        if isinstance(prompts[0], str):
-            # Inference with text input
-            if self.tokenizer.bos_token:
-                # removeprefix bos_token because vllm will add it.
-                prompts = [p.removeprefix(self.tokenizer.bos_token) for p in prompts]
-            outputs = self.llm.generate(
-                prompts,
-                sampling_params=sampling_params,
-                lora_request=lora_request,
-                use_tqdm=False,
-            )
-        else:
-            # Inference with token input
-            outputs = self.llm.generate(
-                prompt_token_ids=prompts,
-                sampling_params=sampling_params,
-                lora_request=lora_request,
-                use_tqdm=False,
+
+        # is_text_input = isinstance(prompt, str)
+        # if is_text_input and self.tokenizer.bos_token:
+        #     prompt = prompt.removeprefix(self.tokenizer.bos_token)
+
+        request_id = f"{self.actor_id}_{id(prompt)}_{time.time_ns()}"
+        final_output = None
+
+        async for output in self.engine.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            lora_request=lora_request,
+        ):
+            final_output = output
+
+        return final_output
+
+    def generate(
+        self,
+        prompts: List[str],
+        sampling_params: vllm.SamplingParams,
+    ):
+        async def _generate_all():
+            return await tqdm.asyncio.tqdm.gather(
+                *[self.generate_async(p, sampling_params) for p in prompts],
+                desc=f"Generating ({self.actor_id})",
             )
 
-        if self.tokenizer.bos_token:
-            # make sure vllm added bos_token.
-            assert self.tokenizer.bos_token_id in outputs[0].prompt_token_ids
-
+        self.generate_mode = True
+        outputs = asyncio.run(_generate_all())
         self.generate_mode = False
         return outputs
 
@@ -207,16 +216,19 @@ class ActorBase(abc.ABC):
     def init_process_group(
         self, master_address, master_port, rank_offset, world_size, group_name, backend
     ):
-        self._model_update_group = self.llm.collective_rpc(
-            "init_process_group",
-            args=(
-                master_address,
-                master_port,
-                rank_offset,
-                world_size,
-                group_name,
-                backend,
-            ),
+        """Sync wrapper for async collective_rpc."""
+        self._model_update_group = asyncio.run(
+            self.engine.collective_rpc(
+                "init_process_group",
+                args=(
+                    master_address,
+                    master_port,
+                    rank_offset,
+                    world_size,
+                    group_name,
+                    backend,
+                ),
+            )
         )
 
     def is_generating(self):
@@ -225,25 +237,31 @@ class ActorBase(abc.ABC):
     def update_weight(
         self, name, dtype, shape, cuda_ipc_handles=None, empty_cache=False
     ):
-        return self.llm.collective_rpc(
-            "update_weight", args=(name, dtype, shape, cuda_ipc_handles, empty_cache)
+        """Sync wrapper for async collective_rpc."""
+        return asyncio.run(
+            self.engine.collective_rpc(
+                "update_weight", args=(name, dtype, shape, cuda_ipc_handles, empty_cache)
+            )
         )
 
     def update_lora_path(self, lora_path: str):
         self.lora_path = lora_path
 
     def reset_prefix_cache(self):
-        self.llm.llm_engine.reset_prefix_cache()
+        """Sync wrapper for async collective_rpc."""
+        asyncio.run(self.engine.collective_rpc("reset_prefix_cache"))
 
     def sleep(self, level=1):
         """Sleep & Wake Up.
         sleep & wake_up are used together to offload model weights & kv cache to CPUs then onload.
         They are particularly useful when actors & learners collocate.
+        Sync wrapper for async engine.sleep().
         """
-        self.llm.sleep(level=level)
+        asyncio.run(self.engine.sleep(level=level))
 
     def wake_up(self):
-        self.llm.wake_up()
+        """Sync wrapper for async engine.wake_up()."""
+        asyncio.run(self.engine.wake_up())
 
     def update_rm(self, name, dtype, shape):
         assert self.learning_rm

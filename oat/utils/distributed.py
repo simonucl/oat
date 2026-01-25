@@ -121,6 +121,16 @@ def init_process_group(
 
 
 class WorkerWrap:
+    def __getstate__(self):
+        """Exclude non-serializable ProcessGroup from serialization."""
+        state = self.__dict__.copy()
+        if '_model_update_group' in state:
+            state['_model_update_group'] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
     def init_process_group(
         self,
         master_address,
@@ -148,11 +158,9 @@ class WorkerWrap:
             f"init_process_group: master_address={master_address}, master_port={master_port}, "
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
-        return (
-            self._model_update_group
-            if torch.distributed.get_world_size() <= 1
-            else None
-        )
+        # Never return ProcessGroup as it's not serializable in vLLM v1.
+        # The ProcessGroup is stored in self._model_update_group for use by update_weight().
+        return None
 
     def update_weight(
         self, name, dtype, shape, cuda_ipc_handles=None, empty_cache=False
