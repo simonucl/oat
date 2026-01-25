@@ -103,7 +103,7 @@ class ActorBase(abc.ABC):
         for _ in range(10):
             # Retry in case network error when accessing HF.
             try:
-                self.engine = AsyncLLMEngine.from_engine_args(engine_args)
+                self.llm = AsyncLLMEngine.from_engine_args(engine_args)
                 break
             except Exception as e:
                 # In case of timeout.
@@ -114,7 +114,7 @@ class ActorBase(abc.ABC):
         else:
             raise RuntimeError(f"vllm cannot load the model")
 
-        self.tokenizer = self._async_loop.run_coroutine(self.engine.get_tokenizer())
+        self.tokenizer = self._async_loop.run_coroutine(self.llm.get_tokenizer())
         # TODO(liuzc): after vllm upgraded to 0.8.3, we could not access `model_executor`
         # We disable this temporarily since we focus on on-policy algos - actor policy
         # is the same as the one we want to evaluate.
@@ -157,7 +157,7 @@ class ActorBase(abc.ABC):
 
         final_output = None
 
-        async for output in self.engine.generate(
+        async for output in self.llm.generate(
             prompt=prompt,
             sampling_params=sampling_params,
             request_id=f"{self.actor_id}_{time.time_ns()}",
@@ -216,7 +216,7 @@ class ActorBase(abc.ABC):
     ):
         """Sync wrapper for async collective_rpc."""
         self._model_update_group = self._async_loop.run_coroutine(
-            self.engine.collective_rpc(
+            self.llm.collective_rpc(
                 "init_process_group",
                 args=(
                     master_address,
@@ -237,7 +237,7 @@ class ActorBase(abc.ABC):
     ):
         """Sync wrapper for async collective_rpc."""
         return self._async_loop.run_coroutine(
-            self.engine.collective_rpc(
+            self.llm.collective_rpc(
                 "update_weight", args=(name, dtype, shape, cuda_ipc_handles, empty_cache)
             )
         )
@@ -246,7 +246,7 @@ class ActorBase(abc.ABC):
         self.lora_path = lora_path
 
     def reset_prefix_cache(self):
-        self._async_loop.run_coroutine(self.engine.reset_prefix_cache()) 
+        self._async_loop.run_coroutine(self.llm.reset_prefix_cache()) 
 
     def sleep(self, level=1):
         """Sleep & Wake Up.
@@ -254,11 +254,11 @@ class ActorBase(abc.ABC):
         They are particularly useful when actors & learners collocate.
         Sync wrapper for async engine.sleep().
         """
-        self._async_loop.run_coroutine(self.engine.sleep(level=level))
+        self._async_loop.run_coroutine(self.llm.sleep(level=level))
 
     def wake_up(self):
         """Sync wrapper for async engine.wake_up()."""
-        self._async_loop.run_coroutine(self.engine.wake_up())
+        self._async_loop.run_coroutine(self.llm.wake_up())
 
     def update_rm(self, name, dtype, shape):
         assert self.learning_rm

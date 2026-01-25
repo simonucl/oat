@@ -86,8 +86,7 @@ def init_process_group(
         backend = Backend("undefined")
 
     if timeout is None:
-        # Use a shorter timeout (5 minutes) for faster failure detection
-        timeout = timedelta(minutes=5)
+        timeout = default_pg_timeout
 
     # backward compatible API
     if store is None:
@@ -182,7 +181,7 @@ class WorkerWrap:
         else:
             # Using nccl when actors and learners are on difference devices.
             weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, src=0, group=self._model_update_group)
+            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
             self.model_runner.model.load_weights(weights=[(name, weight)])
 
         del weight
