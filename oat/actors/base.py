@@ -13,14 +13,12 @@
 # limitations under the License.
 
 import abc
-import asyncio
 import logging
 import os
 import time
 from typing import List, Union
 
 import torch
-import tqdm.asyncio
 import vllm
 from packaging import version
 from vllm import AsyncEngineArgs, AsyncLLMEngine
@@ -32,6 +30,7 @@ from oat.rm import model
 from oat.types import PreferenceData, TransitionData
 from oat.utils.distributed import torch_type_codec
 from oat.utils.ipc import PlasmaShmClient
+from oat.utils.async_utils import AsyncLoopThread
 
 logging.getLogger("vllm").setLevel(logging.WARNING)
 
@@ -96,6 +95,9 @@ class ActorBase(abc.ABC):
         if args.disable_cascade_attn is not None:
             self.vllm_args.update({"disable_cascade_attn": args.disable_cascade_attn})
 
+        self._async_loop = AsyncLoopThread()
+        self._async_loop.start()
+
         engine_args = AsyncEngineArgs(**self.vllm_args)
         _wait_time = 5
         for _ in range(10):
@@ -112,7 +114,7 @@ class ActorBase(abc.ABC):
         else:
             raise RuntimeError(f"vllm cannot load the model")
 
-        self.tokenizer = asyncio.run(self.engine.get_tokenizer())
+        self.tokenizer = self._async_loop.run_coroutine(self.engine.get_tokenizer())
         # TODO(liuzc): after vllm upgraded to 0.8.3, we could not access `model_executor`
         # We disable this temporarily since we focus on on-policy algos - actor policy
         # is the same as the one we want to evaluate.
@@ -149,17 +151,16 @@ class ActorBase(abc.ABC):
             else None
         )
 
-        # is_text_input = isinstance(prompt, str)
-        # if is_text_input and self.tokenizer.bos_token:
-        #     prompt = prompt.removeprefix(self.tokenizer.bos_token)
+        is_text_input = isinstance(prompt, str)
+        if is_text_input and self.tokenizer.bos_token:
+            prompt = prompt.removeprefix(self.tokenizer.bos_token)
 
-        request_id = f"{self.actor_id}_{id(prompt)}_{time.time_ns()}"
         final_output = None
 
         async for output in self.engine.generate(
             prompt=prompt,
             sampling_params=sampling_params,
-            request_id=request_id,
+            request_id=f"{self.actor_id}_{time.time_ns()}",
             lora_request=lora_request,
         ):
             final_output = output
@@ -171,14 +172,10 @@ class ActorBase(abc.ABC):
         prompts: List[str],
         sampling_params: vllm.SamplingParams,
     ):
-        async def _generate_all():
-            return await tqdm.asyncio.tqdm.gather(
-                *[self.generate_async(p, sampling_params) for p in prompts],
-                desc=f"Generating ({self.actor_id})",
-            )
-
         self.generate_mode = True
-        outputs = asyncio.run(_generate_all())
+        outputs = self._async_loop.run_gather(
+            *[self.generate_async(p, sampling_params) for p in prompts]
+        )
         self.generate_mode = False
         return outputs
 
@@ -213,11 +210,12 @@ class ActorBase(abc.ABC):
             references: A list of reference texts.
         """
 
+
     def init_process_group(
         self, master_address, master_port, rank_offset, world_size, group_name, backend
     ):
         """Sync wrapper for async collective_rpc."""
-        self._model_update_group = asyncio.run(
+        self._model_update_group = self._async_loop.run_coroutine(
             self.engine.collective_rpc(
                 "init_process_group",
                 args=(
@@ -238,7 +236,7 @@ class ActorBase(abc.ABC):
         self, name, dtype, shape, cuda_ipc_handles=None, empty_cache=False
     ):
         """Sync wrapper for async collective_rpc."""
-        return asyncio.run(
+        return self._async_loop.run_coroutine(
             self.engine.collective_rpc(
                 "update_weight", args=(name, dtype, shape, cuda_ipc_handles, empty_cache)
             )
@@ -248,8 +246,7 @@ class ActorBase(abc.ABC):
         self.lora_path = lora_path
 
     def reset_prefix_cache(self):
-        """Sync wrapper for async collective_rpc."""
-        asyncio.run(self.engine.collective_rpc("reset_prefix_cache"))
+        self._async_loop.run_coroutine(self.engine.reset_prefix_cache()) 
 
     def sleep(self, level=1):
         """Sleep & Wake Up.
@@ -257,11 +254,11 @@ class ActorBase(abc.ABC):
         They are particularly useful when actors & learners collocate.
         Sync wrapper for async engine.sleep().
         """
-        asyncio.run(self.engine.sleep(level=level))
+        self._async_loop.run_coroutine(self.engine.sleep(level=level))
 
     def wake_up(self):
         """Sync wrapper for async engine.wake_up()."""
-        asyncio.run(self.engine.wake_up())
+        self._async_loop.run_coroutine(self.engine.wake_up())
 
     def update_rm(self, name, dtype, shape):
         assert self.learning_rm

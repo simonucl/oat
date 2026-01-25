@@ -258,6 +258,8 @@ class LearnerBase(abc.ABC, DistributedLauncher):
                 )
                 for i, actor in enumerate(actors)
             ]
+            # Create NCCL process group for fast weight transfer
+            # Requires NCCL_CUMEM_ENABLE=0 to avoid 'invalid argument' errors
             self._model_update_group = init_process_group(
                 backend=backend,
                 init_method=f"tcp://{master_addr}:{master_port}",
@@ -265,8 +267,14 @@ class LearnerBase(abc.ABC, DistributedLauncher):
                 rank=0,
                 group_name="oat",
             )
+            logging.info(
+                f"Learner init_process_group ({backend}): master_addr={master_addr}, "
+                f"master_port={master_port}, rank=0, world_size={world_size}"
+            )
 
+            # Wait for actor RPCs to complete
             _ = [fut.result() for fut in futs]
+            logging.info("All actors completed init_process_group")
         if len(actors) > 0:
             self._same_actor_group = None
             dist.barrier()
@@ -790,7 +798,8 @@ class LearnerBase(abc.ABC, DistributedLauncher):
                     [param], enabled=self.strategy.args.zero_stage == 3
                 ):
                     if self.strategy.is_group_rank_0():
-                        dist.broadcast(param.data, 0, group=self._model_update_group)
+                        # Use NCCL broadcast for fast GPU-to-GPU transfer
+                        dist.broadcast(param.data, src=0, group=self._model_update_group)
                         _ = [fut.result() for fut in futs]
 
         if reset_prefix_cache_futs:

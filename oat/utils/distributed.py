@@ -16,9 +16,14 @@
 
 import errno
 import logging
+import os
 import socket
 from datetime import timedelta
 from typing import Any, Optional, Union
+
+# Fix for NCCL issues with vLLM-v1 - prevents 'invalid argument' errors
+# See: https://github.com/vllm-project/vllm/issues/5723#issuecomment-2554389656
+os.environ.setdefault("NCCL_CUMEM_ENABLE", "0")
 
 import torch
 from torch.distributed.distributed_c10d import (
@@ -53,7 +58,6 @@ def torch_type_codec(dtype_or_str):
     else:
         raise ValueError(f"Invalid dtype or str: {dtype_or_str}")
 
-
 # Copy from pytorch to allow creating multiple main groups.
 # https://github.com/pytorch/pytorch/blob/main/torch/distributed/distributed_c10d.py
 def init_process_group(
@@ -82,7 +86,8 @@ def init_process_group(
         backend = Backend("undefined")
 
     if timeout is None:
-        timeout = default_pg_timeout
+        # Use a shorter timeout (5 minutes) for faster failure detection
+        timeout = timedelta(minutes=5)
 
     # backward compatible API
     if store is None:
@@ -122,7 +127,6 @@ def init_process_group(
 
 class WorkerWrap:
     def __getstate__(self):
-        """Exclude non-serializable ProcessGroup from serialization."""
         state = self.__dict__.copy()
         if '_model_update_group' in state:
             state['_model_update_group'] = None
@@ -154,8 +158,9 @@ class WorkerWrap:
             rank=rank,
             group_name=group_name,
         )
+
         logging.info(
-            f"init_process_group: master_address={master_address}, master_port={master_port}, "
+            f"init_process_group ({backend}): master_address={master_address}, master_port={master_port}, "
             f"rank={rank}, world_size={world_size}, group_name={group_name}",
         )
         # Never return ProcessGroup as it's not serializable in vLLM v1.
@@ -177,7 +182,7 @@ class WorkerWrap:
         else:
             # Using nccl when actors and learners are on difference devices.
             weight = torch.empty(shape, dtype=dtype, device="cuda")
-            torch.distributed.broadcast(weight, 0, group=self._model_update_group)
+            torch.distributed.broadcast(weight, src=0, group=self._model_update_group)
             self.model_runner.model.load_weights(weights=[(name, weight)])
 
         del weight
